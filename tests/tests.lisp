@@ -256,6 +256,20 @@
                  "deadline supervision returns promptly"))
   nil)
 
+(defun test-merged-output ()
+  "Test callers can retain the original ordering of standard output and error."
+  (let ((result
+          (run-sandboxed
+           "/bin/sh"
+           '("-c" "printf one; printf two >&2; printf three")
+           :policy (read-only-sandbox-policy)
+           :merge-output-p t)))
+    (test-assert (string= (sandbox-result-output result) "onetwothree")
+                 "merged command output preserves stream write order")
+    (test-assert (string= (sandbox-result-error-output result) "")
+                 "merged command output leaves no duplicate error stream"))
+  nil)
+
 (defun test-isolated-network-seccomp ()
   "Test restricted networking denies Internet socket creation with seccomp."
   (let ((result
@@ -335,6 +349,7 @@
   (test-unrestricted-filesystem-with-isolated-network)
   (test-external-execution-context)
   (test-timeout)
+  (test-merged-output)
   (test-isolated-network-seccomp)
   (test-managed-proxy-network)
   (format t "~&~D cl-exec-sandbox tests passed.~%" *test-count*)

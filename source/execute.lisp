@@ -56,12 +56,12 @@
     (cons (intern (string-upcase (subseq entry 0 separator)) :keyword)
           (subseq entry (1+ separator)))))
 
-(defun execute--launch-plan (plan input output-path error-path)
+(defun execute--launch-plan (plan input output-path error-path merge-output-p)
   "Launch PLAN with INPUT and redirected output paths."
   (let ((arguments
           (list :input input
                 :output output-path
-                :error-output error-path
+                :error-output (if merge-output-p :output error-path)
                 :directory (sandbox-plan-working-directory plan)
                 :ignore-error-status t)))
     (when (sandbox-plan-environment-provided-p plan)
@@ -75,7 +75,7 @@
                  (sandbox-plan-arguments plan))
            arguments)))
 
-(defun execute--run-plan (plan input timeout)
+(defun execute--run-plan (plan input timeout merge-output-p)
   "Run PLAN with INPUT and optional TIMEOUT, returning a SANDBOX-RESULT."
   (uiop:with-temporary-file (:pathname output-path
                              :prefix "cl-exec-sandbox-output-")
@@ -85,7 +85,8 @@
                          (coerce internal-time-units-per-second 'double-float)))
              (process
                (handler-case
-                   (execute--launch-plan plan input output-path error-path)
+                   (execute--launch-plan plan input output-path error-path
+                                         merge-output-p)
                  (error (condition)
                    (error 'sandbox-execution-error
                           :message (format nil "Could not launch sandbox: ~A" condition)
@@ -122,7 +123,8 @@
        environment
        clear-environment-p
        input
-       timeout)
+       timeout
+       merge-output-p)
   "Run PROGRAM and ARGUMENTS under POLICY and return a captured SANDBOX-RESULT."
   (unless (or (null timeout) (and (realp timeout) (plusp timeout)))
     (error 'sandbox-policy-error
@@ -133,6 +135,6 @@
                                   :environment environment
                                   :clear-environment-p clear-environment-p)))
     (unwind-protect
-         (execute--run-plan plan input timeout)
+         (execute--run-plan plan input timeout merge-output-p)
       (dolist (path (reverse (sandbox-plan-cleanup-paths plan)))
         (execute--safe-delete path)))))
