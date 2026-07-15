@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+source_root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+"$source_root/scripts/build-helper"
+
+exec sbcl --noinform --non-interactive \
+  --eval '(require :asdf)' \
+  --eval "(push #P\"$source_root/\" asdf:*central-registry*)" \
+  --eval '(asdf:test-system :cl-exec-sandbox)'

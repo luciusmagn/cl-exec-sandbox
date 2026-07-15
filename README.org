@@ -1,0 +1,52 @@
+#+TITLE: cl-exec-sandbox
+
+=cl-exec-sandbox= is a policy-driven process sandboxing library for Common
+Lisp. Its Linux policy model provides:
+
+- read, write, and deny filesystem rules;
+- literal paths, deny globs, and portable special roots;
+- more-specific nested policy overrides;
+- read-only host and workspace-write presets;
+- protected project metadata such as =.git=;
+- full, isolated, and managed proxy-only network modes;
+- process, user, IPC, UTS, and network namespace isolation;
+- fresh =/proc= and minimal =/dev= mounts;
+- child timeouts and captured output;
+- explicit capability discovery and fail-closed unsupported-policy errors.
+
+The first backend targets Linux x86-64 and SBCL. It uses the system =bwrap=
+binary for filesystem and namespace isolation, plus a private helper for
+=no_new_privs=, seccomp, and managed proxy routing. The helper is not installed
+on =PATH=. The library never silently runs a restricted policy without the
+required backend.
+
+The policy surface and Linux enforcement model were checked against OpenAI
+Codex commit =2e1607ee2fa8099a233df7437adee5f16a741905=. Codex is a reference,
+not a dependency.
+
+* Example
+
+#+BEGIN_SRC lisp
+(let ((policy
+        (cl-exec-sandbox:workspace-write-sandbox-policy
+         :workspace-roots (list #P"/work/project/")
+         :network :isolated)))
+  (cl-exec-sandbox:run-sandboxed
+   "/bin/sh"
+   '("-c" "git status --short")
+   :policy policy
+   :working-directory #P"/work/project/"))
+#+END_SRC
+
+* Checks
+
+Build the private Linux helper and run the complete test suite:
+
+#+BEGIN_SRC sh
+./check
+#+END_SRC
+
+Applications which vendor this system should run =scripts/build-helper= during
+their build and ship =build/cl-exec-sandbox-helper= beside the Lisp sources.
+Set =CL_EXEC_SANDBOX_HELPER= to an alternate absolute helper path when the
+installed layout differs.
