@@ -51,3 +51,5 @@ their build and ship =build/cl-exec-sandbox-helper= beside the Lisp sources.
 Set =CL_EXEC_SANDBOX_HELPER= to an alternate absolute helper path when the
 installed layout differs. Packaged Bubblewrap installations outside =/usr/bin=
 and =/bin= can set =CL_EXEC_SANDBOX_BWRAP= to its absolute executable path.
+
+Part of the [[https://www.lambda-symbolics.com/libraries][Lambda Symbolics library shelf]].
