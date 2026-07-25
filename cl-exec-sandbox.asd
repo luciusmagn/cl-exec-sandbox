@@ -1,7 +1,7 @@
 (asdf:defsystem #:cl-exec-sandbox
   :description "Policy-driven external process sandboxing for Common Lisp."
   :author "Lukáš Hozda"
-  :license "MIT"
+  :license "ISC"
   :version "0.1.0"
   :serial t
   :depends-on ()
