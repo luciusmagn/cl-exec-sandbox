@@ -295,7 +295,7 @@
   (let ((result
           (run-sandboxed
            "/bin/bash"
-           '("-c" "exec 3<>/dev/tcp/127.0.0.1/1")
+           '("-c" "export LC_ALL=C; exec 3<>/dev/tcp/127.0.0.1/1")
            :policy (read-only-sandbox-policy))))
     (test-assert (not (zerop (sandbox-result-exit-code result)))
                  "isolated networking rejects an Internet socket")
