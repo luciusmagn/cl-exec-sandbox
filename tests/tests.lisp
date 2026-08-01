@@ -290,6 +290,78 @@
                  "merged command output leaves no duplicate error stream"))
   nil)
 
+(defun test-output-capture-limits ()
+  "Test bounded output capture and explicit truncation metadata."
+  (let ((exact
+          (run-sandboxed "/bin/sh" '("-c" "printf 12345; printf abc >&2")
+                         :policy (read-only-sandbox-policy)
+                         :output-limit 5
+                         :error-output-limit 3))
+        (truncated
+          (run-sandboxed "/bin/sh" '("-c" "printf 123456; printf abcd >&2")
+                         :policy (read-only-sandbox-policy)
+                         :output-limit 5
+                         :error-output-limit 3))
+        (merged
+          (run-sandboxed "/bin/sh" '("-c" "printf one; printf two >&2")
+                         :policy (read-only-sandbox-policy)
+                         :merge-output-p t
+                         :output-limit 4
+                         :error-output-limit 4))
+        (zero
+          (run-sandboxed "/bin/sh" '("-c" "printf x")
+                         :policy (read-only-sandbox-policy)
+                         :output-limit 0))
+        (large
+          (run-sandboxed
+           "/bin/sh"
+           '("-c" "head -c 16777216 /dev/zero | tr '\\000' x")
+           :policy (read-only-sandbox-policy)
+           :output-limit 1024)))
+    (test-assert (string= (sandbox-result-output exact) "12345")
+                 "an exactly full standard output is retained")
+    (test-assert (not (sandbox-result-output-truncated-p exact))
+                 "an exactly full standard output is not marked truncated")
+    (test-assert (string= (sandbox-result-error-output exact) "abc")
+                 "an exactly full standard error is retained")
+    (test-assert (not (sandbox-result-error-output-truncated-p exact))
+                 "an exactly full standard error is not marked truncated")
+    (test-assert (string= (sandbox-result-output truncated) "12345")
+                 "standard output is capped at its configured limit")
+    (test-assert (sandbox-result-output-truncated-p truncated)
+                 "capped standard output is marked truncated")
+    (test-assert (string= (sandbox-result-error-output truncated) "abc")
+                 "standard error is capped independently")
+    (test-assert (sandbox-result-error-output-truncated-p truncated)
+                 "capped standard error is marked truncated")
+    (test-assert (string= (sandbox-result-output merged) "onet")
+                 "merged output uses the standard output limit")
+    (test-assert (sandbox-result-output-truncated-p merged)
+                 "capped merged output is marked truncated")
+    (test-assert (string= (sandbox-result-error-output merged) "")
+                 "merged output leaves standard error empty")
+    (test-assert (not (sandbox-result-error-output-truncated-p merged))
+                 "empty merged standard error is not marked truncated")
+    (test-assert (string= (sandbox-result-output zero) "")
+                 "a zero output limit captures no characters")
+    (test-assert (sandbox-result-output-truncated-p zero)
+                 "a zero output limit detects available output")
+    (test-assert (= (length (sandbox-result-output large)) 1024)
+                 "large command output remains bounded")
+    (test-assert (sandbox-result-output-truncated-p large)
+                 "large command output reports truncation")
+    (test-assert
+     (handler-case
+         (progn
+           (run-sandboxed "/bin/true" nil
+                          :policy (read-only-sandbox-policy)
+                          :output-limit -1)
+           nil)
+       (sandbox-policy-error ()
+         t))
+     "negative output limits are rejected"))
+  nil)
+
 (defun test-isolated-network-seccomp ()
   "Test restricted networking denies Internet socket creation with seccomp."
   (let ((result
@@ -371,6 +443,7 @@
   (test-external-execution-context)
   (test-timeout)
   (test-merged-output)
+  (test-output-capture-limits)
   (test-isolated-network-seccomp)
   (test-managed-proxy-network)
   (format t "~&~D cl-exec-sandbox tests passed.~%" *test-count*)

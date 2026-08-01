@@ -13,11 +13,21 @@
     :reader sandbox-result-output
     :type string
     :documentation "Captured standard output.")
+   (output-truncated-p
+    :initarg :output-truncated-p
+    :reader sandbox-result-output-truncated-p
+    :type boolean
+    :documentation "Whether standard output exceeded its capture limit.")
    (error-output
     :initarg :error-output
     :reader sandbox-result-error-output
     :type string
     :documentation "Captured standard error.")
+   (error-output-truncated-p
+    :initarg :error-output-truncated-p
+    :reader sandbox-result-error-output-truncated-p
+    :type boolean
+    :documentation "Whether standard error exceeded its capture limit.")
    (timed-out-p
     :initarg :timed-out-p
     :reader sandbox-result-timed-out-p
@@ -28,13 +38,35 @@
     :reader sandbox-result-real-seconds
     :type real
     :documentation "Elapsed monotonic wall-clock seconds."))
-  (:documentation "The complete captured outcome of one sandboxed command."))
+  (:documentation "The captured outcome of one sandboxed command."))
 
-(defun execute--read-file (path)
-  "Return PATH's complete contents, or an empty string when it was not published."
-  (if (probe-file path)
-      (uiop:read-file-string path)
-      ""))
+(defun execute--validate-output-limit (limit name)
+  "Require LIMIT named by NAME to be NIL or a supported character count."
+  (unless (or (null limit)
+              (and (integerp limit)
+                   (<= 0 limit)
+                   (< limit array-dimension-limit)))
+    (error 'sandbox-policy-error
+           :message (format nil
+                            "~A must be NIL or a non-negative integer below ~D."
+                            name array-dimension-limit)))
+  limit)
+
+(defun execute--read-file (path limit)
+  "Return up to LIMIT characters from PATH and whether more were available."
+  (cond
+    ((not (probe-file path))
+     (values "" nil))
+    ((null limit)
+     (values (uiop:read-file-string path) nil))
+    (t
+     (with-open-file (stream path :direction :input)
+       (let* ((buffer (make-string limit))
+              (count  (read-sequence buffer stream)))
+         (values (if (= count limit)
+                     buffer
+                     (subseq buffer 0 count))
+                 (not (eq (read-char stream nil :eof) :eof))))))))
 
 (defun execute--safe-delete (path)
   "Remove transient PATH only when it is still an empty file or directory."
@@ -75,8 +107,9 @@
                  (sandbox-plan-arguments plan))
            arguments)))
 
-(defun execute--run-plan (plan input timeout merge-output-p)
-  "Run PLAN with INPUT and optional TIMEOUT, returning a SANDBOX-RESULT."
+(defun execute--run-plan
+    (plan input timeout merge-output-p output-limit error-output-limit)
+  "Run PLAN with INPUT, TIMEOUT, and capture limits, returning a result."
   (uiop:with-temporary-file (:pathname output-path
                              :prefix "cl-exec-sandbox-output-")
     (uiop:with-temporary-file (:pathname error-path
@@ -108,12 +141,18 @@
         (let ((exit-code (uiop:wait-process process))
               (finished (/ (get-internal-real-time)
                            (coerce internal-time-units-per-second 'double-float))))
-          (make-instance 'sandbox-result
-                         :exit-code exit-code
-                         :output (execute--read-file output-path)
-                         :error-output (execute--read-file error-path)
-                         :timed-out-p timed-out-p
-                         :real-seconds (- finished started)))))))
+          (multiple-value-bind (output output-truncated-p)
+              (execute--read-file output-path output-limit)
+            (multiple-value-bind (error-output error-output-truncated-p)
+                (execute--read-file error-path error-output-limit)
+              (make-instance 'sandbox-result
+                             :exit-code exit-code
+                             :output output
+                             :output-truncated-p output-truncated-p
+                             :error-output error-output
+                             :error-output-truncated-p error-output-truncated-p
+                             :timed-out-p timed-out-p
+                             :real-seconds (- finished started)))))))))
 
 (defun run-sandboxed
     (program arguments
@@ -124,17 +163,22 @@
        clear-environment-p
        input
        timeout
-       merge-output-p)
+       merge-output-p
+       output-limit
+       error-output-limit)
   "Run PROGRAM and ARGUMENTS under POLICY and return a captured SANDBOX-RESULT."
   (unless (or (null timeout) (and (realp timeout) (plusp timeout)))
     (error 'sandbox-policy-error
            :message "TIMEOUT must be NIL or a positive number of seconds."))
+  (execute--validate-output-limit output-limit "OUTPUT-LIMIT")
+  (execute--validate-output-limit error-output-limit "ERROR-OUTPUT-LIMIT")
   (let ((plan (sandbox-build-plan program arguments
                                   :policy policy
                                   :working-directory working-directory
                                   :environment environment
                                   :clear-environment-p clear-environment-p)))
     (unwind-protect
-         (execute--run-plan plan input timeout merge-output-p)
+         (execute--run-plan plan input timeout merge-output-p
+                            output-limit error-output-limit)
       (dolist (path (reverse (sandbox-plan-cleanup-paths plan)))
         (execute--safe-delete path)))))

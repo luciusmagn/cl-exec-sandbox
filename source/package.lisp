@@ -40,7 +40,9 @@
    #:sandbox-result
    #:sandbox-result-exit-code
    #:sandbox-result-output
+   #:sandbox-result-output-truncated-p
    #:sandbox-result-error-output
+   #:sandbox-result-error-output-truncated-p
    #:sandbox-result-timed-out-p
    #:sandbox-result-real-seconds
    #:run-sandboxed))

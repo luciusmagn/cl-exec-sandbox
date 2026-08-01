@@ -11,7 +11,7 @@ Lisp. Its Linux policy model provides:
 - full, isolated, and managed proxy-only network modes;
 - process, user, IPC, UTS, and network namespace isolation;
 - fresh =/proc= and minimal =/dev= mounts;
-- child timeouts and captured output;
+- child timeouts and optionally bounded captured output;
 - explicit capability discovery and fail-closed unsupported-policy errors.
 
 The first backend targets Linux x86-64 and SBCL. It uses the system =bwrap=
@@ -35,8 +35,15 @@ not a dependency.
    "/bin/sh"
    '("-c" "git status --short")
    :policy policy
-   :working-directory #P"/work/project/"))
+   :working-directory #P"/work/project/"
+     :output-limit 65536
+     :error-output-limit 65536))
 #+END_SRC
+
+When a limit is exceeded, the returned prefix remains available through
+=sandbox-result-output= or =sandbox-result-error-output=. Inspect
+=sandbox-result-output-truncated-p= and
+=sandbox-result-error-output-truncated-p= before presenting captured output.
 
 * Checks
 
