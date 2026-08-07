@@ -1,6 +1,6 @@
 (in-package #:cl-exec-sandbox)
 
-;;;; -- Backend Capability Discovery --
+;;;; -- Bubblewrap Discovery --
 
 (defun linux--find-bwrap ()
   "Return the configured or trusted system Bubblewrap pathname."
@@ -25,66 +25,7 @@
     (when (path--executable-file-p candidate)
       (truename candidate))))
 
-(defun sandbox-capabilities ()
-  "Return a portable plist describing the current host sandbox backend."
-  (let ((bwrap (and (member :linux *features*) (linux--find-bwrap)))
-        (rg (and (member :linux *features*) (rules--find-rg)))
-        (helper (and (member :linux *features*) (linux--find-helper))))
-    (list :platform (cond
-                      ((member :linux *features*) :linux)
-                      ((member :darwin *features*) :macos)
-                      ((member :windows *features*) :windows)
-                      (t :unknown))
-          :backend (and bwrap :bubblewrap)
-          :available-p (not (null bwrap))
-          :filesystem-read-write-deny (not (null bwrap))
-          :filesystem-deny-globs (and (not (null bwrap)) (not (null rg)))
-          :nested-overrides (not (null bwrap))
-          :process-namespaces (not (null bwrap))
-          :network-enabled t
-          :network-isolated (and (not (null bwrap)) (not (null helper)))
-          :network-proxy-only (and (not (null bwrap)) (not (null helper)))
-          :seccomp (not (null helper)))))
-
-(defun sandbox-supported-p (&optional (capability :available-p))
-  "Return true when the host reports CAPABILITY in SANDBOX-CAPABILITIES."
-  (not (null (getf (sandbox-capabilities) capability))))
-
-
 ;;;; -- Bubblewrap Plan --
-
-(defclass sandbox-plan ()
-  ((program
-    :initarg :program
-    :reader sandbox-plan-program
-    :type pathname
-    :documentation "The host program that starts the planned command.")
-   (arguments
-    :initarg :arguments
-    :reader sandbox-plan-arguments
-    :type list
-    :documentation "Arguments passed to PROGRAM.")
-   (environment
-   :initarg :environment
-    :reader sandbox-plan-environment
-    :type list
-    :documentation "Environment entries passed to PROGRAM as KEY=VALUE strings.")
-   (environment-provided-p
-    :initarg :environment-provided-p
-    :reader sandbox-plan-environment-provided-p
-    :type boolean
-    :documentation "Whether execution should replace rather than inherit the host environment.")
-   (working-directory
-    :initarg :working-directory
-    :reader sandbox-plan-working-directory
-    :type pathname
-    :documentation "The host working directory used for a direct launch.")
-   (cleanup-paths
-    :initarg :cleanup-paths
-    :reader sandbox-plan-cleanup-paths
-    :type list
-    :documentation "Transient host paths removed after execution when still safe."))
-  (:documentation "A fully validated native launch plan and its cleanup obligations."))
 
 (defun linux--append-target-parent-arguments (arguments path)
   "Append --dir operations ensuring PATH's parent components exist in a minimal root."
@@ -348,55 +289,3 @@
                            :environment-provided-p nil
                            :working-directory cwd
                            :cleanup-paths cleanup-paths))))))
-
-(defun sandbox-build-plan
-    (program arguments
-     &key policy working-directory environment clear-environment-p)
-  "Build a validated native launch plan for PROGRAM and ARGUMENTS."
-  (unless (typep policy 'sandbox-policy)
-    (error 'sandbox-policy-error
-           :message "SANDBOX-BUILD-PLAN requires a SANDBOX-POLICY."))
-  (unless (and (listp arguments) (every #'stringp arguments))
-    (error 'sandbox-policy-error
-           :message "Command arguments must be a list of strings."))
-  (let* ((cwd (policy--absolute-directory
-               (or working-directory (uiop:getcwd))
-               "The command working directory"))
-         (program-path
-           (let ((pathname (pathname program)))
-             (if (uiop:absolute-pathname-p pathname)
-                 pathname
-                 (or (loop for directory in (path--directories)
-                           for candidate = (merge-pathnames pathname directory)
-                           when (path--executable-file-p candidate)
-                             return (truename candidate))
-                     (error 'sandbox-execution-error
-                            :message (format nil "Could not find executable ~A." program)
-                            :command (cons program arguments)))))))
-    (cond
-      ((eq (sandbox-policy-filesystem-kind policy) :external)
-       (make-instance 'sandbox-plan
-                      :program program-path
-                      :arguments arguments
-                      :environment environment
-                      :environment-provided-p (or (not (null environment))
-                                                  clear-environment-p)
-                      :working-directory cwd
-                      :cleanup-paths nil))
-      ((and (eq (sandbox-policy-filesystem-kind policy) :unrestricted)
-            (eq (sandbox-policy-network policy) :enabled))
-       (make-instance 'sandbox-plan
-                      :program program-path
-                      :arguments arguments
-                      :environment environment
-                      :environment-provided-p (or (not (null environment))
-                                                  clear-environment-p)
-                      :working-directory cwd
-                      :cleanup-paths nil))
-      ((member :linux *features*)
-       (linux--bubblewrap-plan program-path arguments policy cwd
-                               environment clear-environment-p))
-      (t
-       (error 'sandbox-unavailable
-              :message "No sandbox backend is available for this operating system."
-              :capability :platform-backend)))))
