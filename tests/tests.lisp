@@ -71,6 +71,134 @@
             (sb-posix:unsetenv "CL_EXEC_SANDBOX_BWRAP")))))
   nil)
 
+(defun test-seatbelt-override ()
+  "Test an explicit absolute Seatbelt path supports packaged installations."
+  (let* ((expected (or (probe-file #P"/usr/bin/sandbox-exec")
+                       (probe-file #P"/bin/sh")))
+         (previous (uiop:getenv "CL_EXEC_SANDBOX_SEATBELT")))
+    (when expected
+      (unwind-protect
+           (progn
+             (sb-posix:setenv "CL_EXEC_SANDBOX_SEATBELT"
+                              (uiop:native-namestring expected)
+                              1)
+             (test-assert
+              (equal (truename expected)
+                     (cl-exec-sandbox::macos--find-sandbox-exec))
+              "an explicit absolute Seatbelt path is honored"))
+        (if previous
+            (sb-posix:setenv "CL_EXEC_SANDBOX_SEATBELT" previous 1)
+            (sb-posix:unsetenv "CL_EXEC_SANDBOX_SEATBELT")))))
+  nil)
+
+(defun tests--seatbelt-profile (policy)
+  "Return POLICY translated into a Seatbelt profile for the current directory."
+  (cl-exec-sandbox::macos--seatbelt-profile policy (uiop:getcwd)))
+
+(defun tests--before-p (profile earlier later)
+  "Return true when EARLIER appears in PROFILE strictly before LATER."
+  (let ((earlier-position (search earlier profile))
+        (later-position (search later profile)))
+    (and earlier-position
+         later-position
+         (< earlier-position later-position))))
+
+(defun test-seatbelt-profile-translation ()
+  "Test Seatbelt profile translation, rule ordering, and unsupported policies.
+
+Profile text is a pure function of a policy, so these assertions run on any
+host. They do not verify that macOS enforces the profile."
+  (let ((profile (tests--seatbelt-profile (read-only-sandbox-policy))))
+    (test-assert (tests--before-p profile "(version 1)" "(deny default)")
+                 "a profile opens by denying every operation")
+    (test-assert (search "(allow process*)" profile)
+                 "a profile grants the operations a command needs to start")
+    (test-assert (search "(allow file-read* (subpath \"/\"))" profile)
+                 "a read-only root policy allows reads everywhere")
+    (test-assert (search "(deny file-write* (subpath \"/\"))" profile)
+                 "a read-only root policy denies writes everywhere")
+    (test-assert (tests--before-p profile
+                                 "(deny file-write* (subpath \"/\"))"
+                                 "(allow file-read* file-write* (subpath \"/dev\"))")
+                 "device access survives a read-only root")
+    (test-assert (search "(deny network*)" profile)
+                 "an isolated policy denies networking"))
+  (test-assert (search "(allow network*)"
+                       (tests--seatbelt-profile
+                        (read-only-sandbox-policy :network :enabled)))
+               "an enabled policy allows networking")
+  (test-assert
+   (handler-case
+       (progn (tests--seatbelt-profile
+               (read-only-sandbox-policy :network :proxy-only))
+              nil)
+     (sandbox-unavailable (condition)
+       (eq (sandbox-unavailable-capability condition) :network-proxy-only)))
+   "Seatbelt reports that it cannot enforce a proxy-only network")
+  (test-assert (search "(allow file-read* file-write* (subpath \"/\"))"
+                       (tests--seatbelt-profile
+                        (unrestricted-sandbox-policy :network :isolated)))
+               "an unrestricted policy allows writes everywhere")
+  (let* ((root (tests--temporary-root))
+         (metadata (string-right-trim
+                    "/"
+                    (uiop:native-namestring (merge-pathnames ".git/" root)))))
+    (unwind-protect
+         (let ((profile
+                 (tests--seatbelt-profile
+                  (workspace-write-sandbox-policy
+                   :workspace-roots (list root)
+                   :protected-metadata-names '(".git")))))
+           (test-assert
+            (search (format nil "(allow file-read* file-write* (subpath ~S))"
+                            (string-right-trim "/" (uiop:native-namestring root)))
+                    profile)
+            "a workspace root becomes writable")
+           (test-assert (search (format nil "(deny file-write* (subpath ~S))"
+                                        metadata)
+                                profile)
+                        "protected metadata denies writes")
+           (test-assert
+            (tests--before-p
+             profile
+             (format nil "(allow file-read* file-write* (subpath ~S))"
+                     (string-right-trim "/" (uiop:native-namestring root)))
+             (format nil "(deny file-write* (subpath ~S))" metadata))
+            "protected metadata is denied after its writable root")
+           (test-assert (search "(allow file-read* file-write* (subpath \"/tmp\"))"
+                                profile)
+                        "a workspace-write policy keeps /tmp writable"))
+      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore)))
+  (let* ((root (tests--temporary-root))
+         (file (tests--write (merge-pathnames "token.key" root) "secret")))
+    (unwind-protect
+         (let ((profile
+                 (tests--seatbelt-profile
+                  (make-sandbox-policy
+                   :workspace-roots (list root)
+                   :filesystem-rules
+                   (list (make-filesystem-rule :kind :special
+                                               :path :root
+                                               :access :read)
+                         (make-filesystem-rule :kind :path
+                                               :path file
+                                               :access :deny))))))
+           (test-assert
+            (search (format nil "(deny file-read* file-write* (literal ~S))"
+                            (uiop:native-namestring file))
+                    profile)
+            "a rule naming one file uses a literal filter")
+           (test-assert
+            (not (search (format nil "(subpath ~S)"
+                                 (uiop:native-namestring file))
+                         profile))
+            "a rule naming one file does not widen to a subpath"))
+      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore)))
+  (test-assert (string= (cl-exec-sandbox::macos--quoted-string "a\"b\\c")
+                        "\"a\\\"b\\\\c\"")
+               "profile strings escape quotes and backslashes")
+  nil)
+
 (defun test-read-only-enforcement ()
   "Test a read-only policy permits reads and rejects host writes."
   (let* ((root (tests--temporary-root))
@@ -434,6 +562,8 @@
   (setf *test-count* 0)
   (test-policy-validation)
   (test-bwrap-override)
+  (test-seatbelt-override)
+  (test-seatbelt-profile-translation)
   (test-read-only-enforcement)
   (test-workspace-write-enforcement)
   (test-missing-protected-metadata)
