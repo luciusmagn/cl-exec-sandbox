@@ -4,22 +4,30 @@
 
 (defun sandbox-capabilities ()
   "Return a portable plist describing the current host sandbox backend."
-  (let ((bwrap (and (member :linux *features*) (linux--find-bwrap)))
-        (rg (and (member :linux *features*) (rules--find-rg)))
-        (helper (and (member :linux *features*) (linux--find-helper))))
+  (let* ((linux-p  (not (null (member :linux *features*))))
+         (macos-p  (not (null (member :darwin *features*))))
+         (bwrap    (and linux-p (linux--find-bwrap)))
+         (seatbelt (and macos-p (macos--find-sandbox-exec)))
+         (rg       (and (or linux-p macos-p) (rules--find-rg)))
+         (helper   (and linux-p (linux--find-helper)))
+         (backend  (cond
+                     (bwrap    :bubblewrap)
+                     (seatbelt :seatbelt)
+                     (t        nil))))
     (list :platform (cond
-                      ((member :linux *features*) :linux)
-                      ((member :darwin *features*) :macos)
+                      (linux-p :linux)
+                      (macos-p :macos)
                       ((member :windows *features*) :windows)
                       (t :unknown))
-          :backend (and bwrap :bubblewrap)
-          :available-p (not (null bwrap))
-          :filesystem-read-write-deny (not (null bwrap))
-          :filesystem-deny-globs (and (not (null bwrap)) (not (null rg)))
-          :nested-overrides (not (null bwrap))
+          :backend backend
+          :available-p (not (null backend))
+          :filesystem-read-write-deny (not (null backend))
+          :filesystem-deny-globs (and (not (null backend)) (not (null rg)))
+          :nested-overrides (not (null backend))
           :process-namespaces (not (null bwrap))
           :network-enabled t
-          :network-isolated (and (not (null bwrap)) (not (null helper)))
+          :network-isolated (or (and (not (null bwrap)) (not (null helper)))
+                                (not (null seatbelt)))
           :network-proxy-only (and (not (null bwrap)) (not (null helper)))
           :seccomp (not (null helper)))))
 
@@ -77,6 +85,9 @@
       ((member :linux *features*)
        (linux--bubblewrap-plan program-path arguments policy cwd
                                environment clear-environment-p))
+      ((member :darwin *features*)
+       (macos--seatbelt-plan program-path arguments policy cwd
+                             environment clear-environment-p))
       (t
        (error 'sandbox-unavailable
               :message "No sandbox backend is available for this operating system."

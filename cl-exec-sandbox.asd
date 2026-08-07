@@ -14,6 +14,7 @@
                              (:file "rules")
                              (:file "plan")
                              (:file "linux")
+                             (:file "macos")
                              (:file "backend")
                              (:file "execute"))))
   :in-order-to ((asdf:test-op (asdf:test-op #:cl-exec-sandbox/tests))))
