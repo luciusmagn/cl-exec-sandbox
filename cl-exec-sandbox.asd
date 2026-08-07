@@ -10,6 +10,7 @@
                 :components ((:file "package")
                              (:file "conditions")
                              (:file "policy")
+                             (:file "paths")
                              (:file "linux")
                              (:file "execute"))))
   :in-order-to ((asdf:test-op (asdf:test-op #:cl-exec-sandbox/tests))))

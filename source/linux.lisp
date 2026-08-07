@@ -7,72 +7,30 @@
     #P"/nix/store/" #P"/run/current-system/sw/")
   "System roots exposed by the Linux backend for a :MINIMAL read rule.")
 
-(defun linux--path-components (path)
-  "Return PATH's non-empty slash-separated components."
-  (remove-if (lambda (component) (zerop (length component)))
-             (uiop:split-string (uiop:native-namestring path)
-                                :separator '(#\/))))
-
-(defun linux--path-under-p (path root)
-  "Return true when absolute PATH is ROOT or a descendant of ROOT."
-  (let ((path-namestring (uiop:native-namestring path))
-        (root-namestring
-          (uiop:native-namestring (uiop:ensure-directory-pathname root))))
-    (or (string= path-namestring
-                 (string-right-trim "/" root-namestring))
-        (uiop:string-prefix-p root-namestring path-namestring))))
-
-(defun linux--executable-file-p (path)
-  "Return true when PATH names an executable regular file."
-  (let ((test-program
-          (cond
-            ((probe-file #P"/usr/bin/test") "/usr/bin/test")
-            ((probe-file #P"/bin/test") "/bin/test")
-            (t nil))))
-    (and test-program
-         (probe-file path)
-         (not (uiop:directory-pathname-p (probe-file path)))
-         (zerop
-          (nth-value
-           2
-           (uiop:run-program
-            (list test-program "-x" (uiop:native-namestring path))
-            :ignore-error-status t
-            :output nil
-            :error-output nil))))))
-
-(defun linux--path-directories ()
-  "Return PATH entries as absolute directory pathnames."
-  (loop for entry in (uiop:split-string (or (uiop:getenv "PATH") "")
-                                        :separator '(#\:))
-        when (plusp (length entry))
-          collect (uiop:ensure-directory-pathname
-                   (uiop:ensure-absolute-pathname entry (uiop:getcwd)))))
-
 (defun linux--find-bwrap ()
   "Return the configured or trusted system Bubblewrap pathname."
   (let ((override (uiop:getenv "CL_EXEC_SANDBOX_BWRAP")))
     (or (when (and override
                    (uiop:absolute-pathname-p (pathname override))
-                   (linux--executable-file-p (pathname override)))
+                   (path--executable-file-p (pathname override)))
           (truename override))
         (loop for candidate in '(#P"/usr/bin/bwrap" #P"/bin/bwrap")
-              when (linux--executable-file-p candidate)
+              when (path--executable-file-p candidate)
                 return (truename candidate)))))
 
 (defun linux--find-rg ()
   "Return the configured or PATH-resolved ripgrep pathname, excluding CWD."
   (let ((override (uiop:getenv "CL_EXEC_SANDBOX_RG"))
         (cwd (uiop:getcwd)))
-    (or (when (and override (linux--executable-file-p (pathname override)))
+    (or (when (and override (path--executable-file-p (pathname override)))
           (truename override))
         (loop for candidate in '(#P"/usr/bin/rg" #P"/bin/rg")
-              when (linux--executable-file-p candidate)
+              when (path--executable-file-p candidate)
                 return (truename candidate))
-        (loop for directory in (linux--path-directories)
+        (loop for directory in (path--directories)
               for candidate = (merge-pathnames "rg" directory)
-              when (and (not (linux--path-under-p candidate cwd))
-                        (linux--executable-file-p candidate))
+              when (and (not (path--under-p candidate cwd))
+                        (path--executable-file-p candidate))
                 return (truename candidate)))))
 
 (defun linux--find-helper ()
@@ -84,7 +42,7 @@
                (asdf:system-relative-pathname
                 :cl-exec-sandbox
                 #P"build/cl-exec-sandbox-helper"))))
-    (when (linux--executable-file-p candidate)
+    (when (path--executable-file-p candidate)
       (truename candidate))))
 
 (defun sandbox-capabilities ()
@@ -122,19 +80,6 @@
   (access :read :type (member :read :write :deny))
   (origin :path :type keyword))
 
-(defun linux--absolute-path (path cwd)
-  "Resolve PATH against CWD without requiring it to exist."
-  (uiop:ensure-absolute-pathname (pathname path) cwd))
-
-(defun linux--safe-relative-subpath (subpath)
-  "Return SUBPATH as a relative pathname or signal a policy error."
-  (let ((pathname (pathname subpath)))
-    (when (or (uiop:absolute-pathname-p pathname)
-              (member :up (pathname-directory pathname)))
-      (error 'sandbox-policy-error
-             :message (format nil "Workspace subpath must stay relative: ~A" subpath)))
-    pathname))
-
 (defun linux--special-paths (rule policy cwd)
   "Expand special RULE into absolute paths for POLICY and CWD."
   (case (filesystem-rule-path rule)
@@ -144,7 +89,7 @@
      (remove-if-not #'probe-file +linux-platform-read-roots+))
     (:workspace-roots
      (let ((subpath (and (filesystem-rule-subpath rule)
-                         (linux--safe-relative-subpath
+                         (path--safe-relative-subpath
                           (filesystem-rule-subpath rule)))))
        (mapcar (lambda (root)
                  (if subpath
@@ -153,7 +98,7 @@
                (sandbox-policy-workspace-roots policy))))
     (:tmpdir
      (list (uiop:ensure-directory-pathname
-            (linux--absolute-path
+            (path--absolute
              (or (uiop:getenv "TMPDIR") (uiop:temporary-directory)) cwd))))
     (:slash-tmp
      (list #P"/tmp/"))))
@@ -188,7 +133,7 @@
             nil
             (loop for path in (uiop:split-string output :separator (list #\Null))
                   when (plusp (length path))
-                    collect (linux--absolute-path path root)))))))
+                    collect (path--absolute path root)))))))
 
 (defun linux--expand-glob-rule (rule policy cwd)
   "Expand one deny-glob RULE below POLICY's project roots or CWD."
@@ -220,7 +165,7 @@
       (ecase (filesystem-rule-kind rule)
         (:path
          (push (linux--resolved-rule
-                (linux--absolute-path (filesystem-rule-path rule) cwd)
+                (path--absolute (filesystem-rule-path rule) cwd)
                 (filesystem-rule-access rule)
                 :path)
                rules))
@@ -237,9 +182,9 @@
     (stable-sort
      rules
      (lambda (left right)
-       (let ((left-depth (length (linux--path-components
+       (let ((left-depth (length (path--components
                                   (resolved-filesystem-rule-path left))))
-             (right-depth (length (linux--path-components
+             (right-depth (length (path--components
                                    (resolved-filesystem-rule-path right)))))
          (if (= left-depth right-depth)
              (< (position (resolved-filesystem-rule-access left)
@@ -286,7 +231,7 @@
 
 (defun linux--append-target-parent-arguments (arguments path)
   "Append --dir operations ensuring PATH's parent components exist in a minimal root."
-  (let ((components (butlast (linux--path-components path)))
+  (let ((components (butlast (path--components path)))
         (current ""))
     (dolist (component components arguments)
       (setf current (concatenate 'string current "/" component))
@@ -316,7 +261,7 @@
        (let ((candidate-path (resolved-filesystem-rule-path candidate)))
          (and (eq (resolved-filesystem-rule-access candidate) :write)
               (not (equal candidate-path path))
-              (linux--path-under-p candidate-path path))))
+              (path--under-p candidate-path path))))
      rules)))
 
 (defun linux--append-descendant-parent-arguments (arguments descendant root)
@@ -326,7 +271,7 @@
                      descendant
                      (uiop:pathname-parent-directory-pathname descendant))))
     (loop while (and current
-                     (linux--path-under-p current root)
+                     (path--under-p current root)
                      (not (equal current root)))
           do (push current directories)
              (setf current (uiop:pathname-parent-directory-pathname current)))
@@ -564,9 +509,9 @@
            (let ((pathname (pathname program)))
              (if (uiop:absolute-pathname-p pathname)
                  pathname
-                 (or (loop for directory in (linux--path-directories)
+                 (or (loop for directory in (path--directories)
                            for candidate = (merge-pathnames pathname directory)
-                           when (linux--executable-file-p candidate)
+                           when (path--executable-file-p candidate)
                              return (truename candidate))
                      (error 'sandbox-execution-error
                             :message (format nil "Could not find executable ~A." program)
