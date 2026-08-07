@@ -2,11 +2,6 @@
 
 ;;;; -- Backend Capability Discovery --
 
-(defparameter +linux-platform-read-roots+
-  '(#P"/bin/" #P"/sbin/" #P"/usr/" #P"/etc/" #P"/lib/" #P"/lib64/"
-    #P"/nix/store/" #P"/run/current-system/sw/")
-  "System roots exposed by the Linux backend for a :MINIMAL read rule.")
-
 (defun linux--find-bwrap ()
   "Return the configured or trusted system Bubblewrap pathname."
   (let ((override (uiop:getenv "CL_EXEC_SANDBOX_BWRAP")))
@@ -16,21 +11,6 @@
           (truename override))
         (loop for candidate in '(#P"/usr/bin/bwrap" #P"/bin/bwrap")
               when (path--executable-file-p candidate)
-                return (truename candidate)))))
-
-(defun linux--find-rg ()
-  "Return the configured or PATH-resolved ripgrep pathname, excluding CWD."
-  (let ((override (uiop:getenv "CL_EXEC_SANDBOX_RG"))
-        (cwd (uiop:getcwd)))
-    (or (when (and override (path--executable-file-p (pathname override)))
-          (truename override))
-        (loop for candidate in '(#P"/usr/bin/rg" #P"/bin/rg")
-              when (path--executable-file-p candidate)
-                return (truename candidate))
-        (loop for directory in (path--directories)
-              for candidate = (merge-pathnames "rg" directory)
-              when (and (not (path--under-p candidate cwd))
-                        (path--executable-file-p candidate))
                 return (truename candidate)))))
 
 (defun linux--find-helper ()
@@ -48,7 +28,7 @@
 (defun sandbox-capabilities ()
   "Return a portable plist describing the current host sandbox backend."
   (let ((bwrap (and (member :linux *features*) (linux--find-bwrap)))
-        (rg (and (member :linux *features*) (linux--find-rg)))
+        (rg (and (member :linux *features*) (rules--find-rg)))
         (helper (and (member :linux *features*) (linux--find-helper))))
     (list :platform (cond
                       ((member :linux *features*) :linux)
@@ -69,129 +49,6 @@
 (defun sandbox-supported-p (&optional (capability :available-p))
   "Return true when the host reports CAPABILITY in SANDBOX-CAPABILITIES."
   (not (null (getf (sandbox-capabilities) capability))))
-
-
-;;;; -- Resolved Rules --
-
-(defstruct (resolved-filesystem-rule
-            (:constructor linux--resolved-rule (path access origin)))
-  "One absolute filesystem rule after special-path and glob expansion."
-  (path #P"/" :type pathname)
-  (access :read :type (member :read :write :deny))
-  (origin :path :type keyword))
-
-(defun linux--special-paths (rule policy cwd)
-  "Expand special RULE into absolute paths for POLICY and CWD."
-  (case (filesystem-rule-path rule)
-    (:root
-     (list #P"/"))
-    (:minimal
-     (remove-if-not #'probe-file +linux-platform-read-roots+))
-    (:workspace-roots
-     (let ((subpath (and (filesystem-rule-subpath rule)
-                         (path--safe-relative-subpath
-                          (filesystem-rule-subpath rule)))))
-       (mapcar (lambda (root)
-                 (if subpath
-                     (merge-pathnames subpath root)
-                     root))
-               (sandbox-policy-workspace-roots policy))))
-    (:tmpdir
-     (list (uiop:ensure-directory-pathname
-            (path--absolute
-             (or (uiop:getenv "TMPDIR") (uiop:temporary-directory)) cwd))))
-    (:slash-tmp
-     (list #P"/tmp/"))))
-
-(defun linux--run-rg-glob (pattern root maximum-depth)
-  "Return existing paths below ROOT matching git-style PATTERN through ripgrep."
-  (let ((rg (linux--find-rg)))
-    (unless rg
-      (error 'sandbox-unavailable
-             :message "Deny-glob expansion requires ripgrep."
-             :capability :filesystem-deny-globs))
-    (let ((arguments (list (uiop:native-namestring rg)
-                           "--files" "--hidden" "--no-ignore" "--null"
-                           "--glob" pattern)))
-      (when maximum-depth
-        (setf arguments
-              (append arguments
-                      (list "--max-depth" (write-to-string maximum-depth)))))
-      (setf arguments
-            (append arguments (list "--" (uiop:native-namestring root))))
-      (multiple-value-bind (output error-output status)
-          (uiop:run-program arguments
-                            :output :string
-                            :error-output :string
-                            :ignore-error-status t)
-        (declare (ignore error-output))
-        (unless (member status '(0 1))
-          (error 'sandbox-policy-error
-                 :message (format nil "Could not expand deny glob ~S below ~A."
-                                  pattern root)))
-        (if (zerop (length output))
-            nil
-            (loop for path in (uiop:split-string output :separator (list #\Null))
-                  when (plusp (length path))
-                    collect (path--absolute path root)))))))
-
-(defun linux--expand-glob-rule (rule policy cwd)
-  "Expand one deny-glob RULE below POLICY's project roots or CWD."
-  (let ((roots (or (sandbox-policy-workspace-roots policy) (list cwd))))
-    (loop for root in roots
-          append (linux--run-rg-glob
-                  (filesystem-rule-path rule)
-                  root
-                  (sandbox-policy-glob-scan-maximum-depth policy)))))
-
-(defun linux--metadata-rules (policy)
-  "Return read-only metadata rules nested below writable project roots."
-  (loop for root in (sandbox-policy-workspace-roots policy)
-        append
-        (loop for name in (sandbox-policy-protected-metadata-names policy)
-              collect (linux--resolved-rule
-                       (merge-pathnames
-                        (uiop:ensure-directory-pathname name)
-                        root)
-                       :read
-                       :protected-metadata))))
-
-(defun linux--resolve-rules (policy cwd)
-  "Return POLICY's absolute rules sorted from broadest to most specific."
-  (let ((rules nil))
-    (when (eq (sandbox-policy-filesystem-kind policy) :unrestricted)
-      (push (linux--resolved-rule #P"/" :write :unrestricted) rules))
-    (dolist (rule (sandbox-policy-filesystem-rules policy))
-      (ecase (filesystem-rule-kind rule)
-        (:path
-         (push (linux--resolved-rule
-                (path--absolute (filesystem-rule-path rule) cwd)
-                (filesystem-rule-access rule)
-                :path)
-               rules))
-        (:special
-         (dolist (path (linux--special-paths rule policy cwd))
-           (push (linux--resolved-rule path
-                                       (filesystem-rule-access rule)
-                                       :special)
-                 rules)))
-        (:glob
-         (dolist (path (linux--expand-glob-rule rule policy cwd))
-           (push (linux--resolved-rule path :deny :glob) rules)))))
-    (setf rules (append rules (linux--metadata-rules policy)))
-    (stable-sort
-     rules
-     (lambda (left right)
-       (let ((left-depth (length (path--components
-                                  (resolved-filesystem-rule-path left))))
-             (right-depth (length (path--components
-                                   (resolved-filesystem-rule-path right)))))
-         (if (= left-depth right-depth)
-             (< (position (resolved-filesystem-rule-access left)
-                          '(:read :write :deny))
-                (position (resolved-filesystem-rule-access right)
-                          '(:read :write :deny)))
-             (< left-depth right-depth)))))))
 
 
 ;;;; -- Bubblewrap Plan --
@@ -416,7 +273,7 @@
       (error 'sandbox-unavailable
              :message "Restricted networking requires the cl-exec-sandbox Linux helper."
              :capability :seccomp-helper))
-    (let* ((rules (linux--resolve-rules policy cwd))
+    (let* ((rules (rules--resolve-rules policy cwd))
            (root-access (linux--root-access rules))
            (minimal-root-p (null root-access))
            (deny-file-mask
