@@ -1,7 +1,7 @@
 #+TITLE: cl-exec-sandbox
 
 =cl-exec-sandbox= is a policy-driven process sandboxing library for Common
-Lisp. Its Linux policy model provides:
+Lisp. Its policy model provides:
 
 - read, write, and deny filesystem rules;
 - literal paths, deny globs, and portable special roots;
@@ -9,20 +9,48 @@ Lisp. Its Linux policy model provides:
 - read-only host and workspace-write presets;
 - protected project metadata such as =.git=;
 - full, isolated, and managed proxy-only network modes;
-- process, user, IPC, UTS, and network namespace isolation;
+- process, user, IPC, UTS, and network namespace isolation on Linux;
 - fresh =/proc= and minimal =/dev= mounts;
 - child timeouts and optionally bounded captured output;
 - explicit capability discovery and fail-closed unsupported-policy errors.
 
-The first backend targets Linux x86-64 and SBCL. It uses the system =bwrap=
-binary for filesystem and namespace isolation, plus a private helper for
-=no_new_privs=, seccomp, and managed proxy routing. The helper is not installed
-on =PATH=. The library never silently runs a restricted policy without the
-required backend.
+One policy is translated by a per-host backend. A policy that a backend cannot
+enforce signals =sandbox-unavailable= naming the missing capability; the library
+never silently runs a restricted policy without the required backend. Query
+=sandbox-capabilities= or =sandbox-supported-p= before relying on a capability.
 
 The policy surface and Linux enforcement model were checked against OpenAI
 Codex commit =2e1607ee2fa8099a233df7437adee5f16a741905=. Codex is a reference,
 not a dependency.
+
+* Linux backend
+
+The Linux backend targets x86-64 and SBCL. It uses the system =bwrap= binary for
+filesystem and namespace isolation, plus a private helper for =no_new_privs=,
+seccomp, and managed proxy routing. The helper is not installed on =PATH=.
+
+* macOS backend
+
+The macOS backend runs commands under Seatbelt through =/usr/bin/sandbox-exec=,
+generating a profile from the same policy. Resolved rules are emitted from the
+broadest to the most specific, so Seatbelt's last-match-wins resolution
+reproduces nested overrides and protected metadata. Whole-root rules are emitted
+before device access, so a read-only root still permits =/dev=. A rule naming a
+single file becomes a =literal= filter rather than a =subpath=, so it cannot
+widen to the parent directory.
+
+Two policy features are not available there:
+
+- =:proxy-only= networking signals =sandbox-unavailable=, because Seatbelt has
+  no managed proxy route. =:enabled= and =:isolated= both work.
+- Seatbelt has no user, process, IPC, UTS, or PID namespace, so
+  =:isolate-processes-p= and =:mount-proc-p= are *not enforced*. Such a policy
+  is translated without them rather than rejected, since both default to true.
+  =sandbox-capabilities= reports =:process-namespaces= as false on macOS. Treat
+  process separation there as an accidental-damage boundary, not containment.
+
+Deny globs need =rg= on either host. Seatbelt installations outside =/usr/bin=
+can set =CL_EXEC_SANDBOX_SEATBELT= to an absolute executable path.
 
 * Example
 
@@ -52,6 +80,9 @@ Build the private Linux helper and run the complete test suite:
 #+BEGIN_SRC sh
 ./check
 #+END_SRC
+
+Seatbelt profile translation is a pure function of a policy, so its tests run on
+any host. They assert the generated profile text, not that macOS enforces it.
 
 Applications which vendor this system should run =scripts/build-helper= during
 their build and ship =build/cl-exec-sandbox-helper= beside the Lisp sources.
